@@ -11,31 +11,52 @@ import type * as React from 'react'; // Import type untuk React.CSSProperties
  * @returns String pace dalam format MM:SS/km. Mengembalikan "N/A" jika jarak/waktu 0.
  */
 export const calculatePace = (time_seconds: number, distance_meters: number): string => {
-    if (distance_meters <= 0 || time_seconds <= 0) {
-        return "N/A";
-    }
-    // Pace: (waktu_detik / jarak_meter) * 1000 m/km
-    const pace_s_per_km = (time_seconds / distance_meters) * 1000;
-    
-    // Konversi detik per km menjadi menit dan detik
-    const minutes = Math.floor(pace_s_per_km / 60);
-    const seconds = Math.floor(pace_s_per_km % 60);
+  if (distance_meters <= 0 || time_seconds <= 0) {
+    return "N/A";
+  }
+  // Pace: (waktu_detik / jarak_meter) * 1000 m/km
+  const pace_s_per_km = (time_seconds / distance_meters) * 1000;
+  
+  // Konversi detik per km menjadi menit dan detik
+  const minutes = Math.floor(pace_s_per_km / 60);
+  const seconds = Math.floor(pace_s_per_km % 60);
 
-    const formattedMinutes = String(minutes).padStart(2, '0');
-    const formattedSeconds = String(seconds).padStart(2, '0');
+  const formattedMinutes = String(minutes).padStart(2, '0');
+  const formattedSeconds = String(seconds).padStart(2, '0');
 
-    return `${formattedMinutes}:${formattedSeconds} /km`;
+  return `${formattedMinutes}:${formattedSeconds} /km`;
 };
 
+
+/**
+ * Konversi total detik ke format M:SS.
+ * Digunakan untuk menampilkan Pace (misalnya 3:45/km).
+ * @param totalSeconds Total detik.
+ * @returns String pace dalam format M:SS.
+ */
+export const secondsToMinutesAndSeconds = (totalSeconds: number): string => {
+    if (totalSeconds <= 0 || !isFinite(totalSeconds)) {
+        return "N/A";
+    }
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = Math.round(totalSeconds % 60);
+    const formattedSeconds = seconds < 10 ? `0${seconds}` : `${seconds}`;
+    return `${minutes}:${formattedSeconds}`;
+};
 
 /**
  * Konversi detik ke format HH:MM:SS.
  */
 export const secondsToHMS = (seconds: number): string => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+
+    if (hours > 0) {
+        return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    } else {
+        return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
 };
 
 /**
@@ -43,33 +64,33 @@ export const secondsToHMS = (seconds: number): string => {
  * @param pace_s_per_m Pace dalam detik per meter (average_pace dari backend).
  */
 export const paceToMinPerKm = (pace_s_per_m: number): string => {
-    if (pace_s_per_m === 0) return 'N/A';
-    // Total detik per km = pace (s/m) * 1000
-    const totalSecondsPerKm = pace_s_per_m * 1000;
-    const minutes = Math.floor(totalSecondsPerKm / 60);
-    const seconds = Math.round(totalSecondsPerKm % 60);
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  if (pace_s_per_m === 0) return 'N/A';
+  // Total detik per km = pace (s/m) * 1000
+  const totalSecondsPerKm = pace_s_per_m * 1000;
+    
+    // Menggunakan fungsi yang sudah ada untuk konsistensi
+    return secondsToMinutesAndSeconds(totalSecondsPerKm);
 };
 
 
 // --- SHARED STYLES (untuk tabel di DistanceStats dan PaceStats) ---
 
 export const tableStyle: React.CSSProperties = { 
-    width: '100%', 
-    borderCollapse: 'collapse', 
+  width: '100%', 
+  borderCollapse: 'collapse', 
 };
 
 export const tableHeaderStyle: React.CSSProperties = { 
-    padding: '10px', 
-    border: '1px solid #ddd', 
-    textAlign: 'left',
-    position: 'sticky',
-    top: 0,
-    background: '#f4f4f4',
+  padding: '10px', 
+  border: '1px solid #ddd', 
+  textAlign: 'left',
+  position: 'sticky',
+  top: 0,
+  background: '#f4f4f4',
 };
 
 export const tableCellStyle: React.CSSProperties = { 
-    padding: '8px 10px', 
-    border: '1px solid #eee', 
-    wordWrap: 'break-word',
+  padding: '8px 10px', 
+  border: '1px solid #eee', 
+  wordWrap: 'break-word',
 };
