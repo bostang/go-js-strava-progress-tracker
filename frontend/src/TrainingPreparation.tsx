@@ -8,27 +8,55 @@ interface TrainingPreparationProps {
 }
 
 const TrainingPreparation: React.FC<TrainingPreparationProps> = ({ activities }) => {
-    const [keyword, setKeyword] = useState('');
+    // State baru untuk mendukung multiple keywords dan filter tanggal
+    const [keywords, setKeywords] = useState('');
+    const [startDate, setStartDate] = useState('');
+    const [endDate, setEndDate] = useState('');
     const [caseSensitive, setCaseSensitive] = useState(false);
 
-    // Hitung statistik berdasarkan keyword yang difilter
+    // Hitung statistik berdasarkan keyword dan tanggal yang difilter
     const { filteredActivities, stats } = useMemo(() => {
         let result = activities;
 
-        // 1. Filter berdasarkan keyword di NAMA AKTIVITAS (activity.name)
-        if (keyword.trim()) {
-            const searchString = caseSensitive ? keyword.trim() : keyword.trim().toLowerCase();
+        // 1. Filter berdasarkan Multiple Keywords di NAMA AKTIVITAS (activity.name)
+        const trimmedKeywords = keywords.trim();
+
+        if (trimmedKeywords) {
+            // Memecah input keywords menjadi array, menghilangkan spasi, dan mengubah case jika tidak sensitif
+            const searchTerms = trimmedKeywords.split(',').map(term => 
+                (caseSensitive ? term.trim() : term.trim().toLowerCase())
+            ).filter(term => term.length > 0);
             
-            result = result.filter(activity => {
-                // Perbaikan: Menggunakan activity.name untuk filter
-                const name = activity.name || ''; 
-                const comparisonText = caseSensitive ? name : name.toLowerCase();
-                
-                return comparisonText.includes(searchString);
-            });
+            if (searchTerms.length > 0) {
+                result = result.filter(activity => {
+                    const name = activity.name || ''; 
+                    const comparisonText = caseSensitive ? name : name.toLowerCase();
+                    
+                    // Aktivitas akan cocok jika namanya mengandung SALAH SATU dari searchTerms
+                    return searchTerms.some(term => comparisonText.includes(term));
+                });
+            }
         }
         
-        // 2. Hitung Statistik
+        // 2. Filter berdasarkan Range Tanggal (activity.start_date)
+        if (startDate || endDate) {
+            const startTimestamp = startDate ? new Date(startDate).getTime() : 0;
+            // Set endDate ke akhir hari (23:59:59) agar inklusif
+            const endTimestamp = endDate 
+                ? new Date(endDate).getTime() + (24 * 60 * 60 * 1000) - 1
+                : Infinity;
+
+            result = result.filter(activity => {
+                const activityTimestamp = new Date(activity.start_date).getTime();
+                
+                const afterStart = startTimestamp === 0 || activityTimestamp >= startTimestamp;
+                const beforeEnd = endTimestamp === Infinity || activityTimestamp <= endTimestamp;
+
+                return afterStart && beforeEnd;
+            });
+        }
+
+        // 3. Hitung Statistik
         const totalDistanceKm = result.reduce((sum, a) => sum + a.distance / 1000, 0);
         const totalMovingTime = result.reduce((sum, a) => sum + a.moving_time, 0);
         const totalActivities = result.length;
@@ -43,36 +71,68 @@ const TrainingPreparation: React.FC<TrainingPreparationProps> = ({ activities })
         };
         
         return { filteredActivities: result, stats };
-    }, [activities, keyword, caseSensitive]);
+    }, [activities, keywords, startDate, endDate, caseSensitive]); // Update dependencies
 
     return (
         <div>
             <h2>Training Preparation & Program Review</h2>
-            <p>Masukkan kata kunci (keyword) yang ada pada **Nama Aktivitas** (misalnya: "Long Run", "Interval", "Tempo", atau nama program) untuk melihat akumulasi dan statistik latihan tersebut.</p>
+            <p>Gunakan filter di bawah ini untuk menganalisis statistik berdasarkan kata kunci (di **Nama Aktivitas**) dan rentang tanggal.</p>
 
-            {/* Kontrol Filter Keyword */}
-            <div style={{ display: 'flex', gap: '20px', marginBottom: '20px', padding: '15px', border: '1px solid #0077b6', borderRadius: '8px', background: '#e0f7fa' }}>
-                <input
-                    type="text"
-                    placeholder="Masukkan Keyword Nama Aktivitas..."
-                    value={keyword}
-                    onChange={(e) => setKeyword(e.target.value)}
-                    style={{ padding: '10px', border: '1px solid #00a6ff', flex: 1, borderRadius: '4px' }}
-                />
-                <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
-                    <input 
-                        type="checkbox" 
-                        checked={caseSensitive} 
-                        onChange={() => setCaseSensitive(!caseSensitive)} 
-                        style={{ marginRight: '8px', transform: 'scale(1.2)' }}
-                    />
-                    Case Sensitive
-                </label>
+            {/* Kontrol Filter */}
+            <div style={{ padding: '15px', border: '1px solid #0077b6', borderRadius: '8px', background: '#e0f7fa' }}>
+                
+                {/* Filter Keyword */}
+                <div style={{ marginBottom: '15px' }}>
+                    <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Filter Keyword (Dipisahkan Koma):</label>
+                    <div style={{ display: 'flex', gap: '15px' }}>
+                        <input
+                            type="text"
+                            placeholder="Contoh: Long Run, Tempo, Interval"
+                            value={keywords}
+                            onChange={(e) => setKeywords(e.target.value)}
+                            style={{ padding: '10px', border: '1px solid #00a6ff', flex: 1, borderRadius: '4px' }}
+                        />
+                        <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                            <input 
+                                type="checkbox" 
+                                checked={caseSensitive} 
+                                onChange={() => setCaseSensitive(!caseSensitive)} 
+                                style={{ marginRight: '8px', transform: 'scale(1.2)' }}
+                            />
+                            Case Sensitive
+                        </label>
+                    </div>
+                </div>
+
+                {/* Filter Tanggal */}
+                <div>
+                    <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Filter Rentang Tanggal:</label>
+                    <div style={{ display: 'flex', gap: '20px' }}>
+                        <div style={{ flex: 1 }}>
+                            <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '3px' }}>Tanggal Awal:</label>
+                            <input
+                                type="date"
+                                value={startDate}
+                                onChange={(e) => setStartDate(e.target.value)}
+                                style={{ padding: '10px', border: '1px solid #00a6ff', width: '100%', boxSizing: 'border-box', borderRadius: '4px' }}
+                            />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                            <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '3px' }}>Tanggal Akhir:</label>
+                            <input
+                                type="date"
+                                value={endDate}
+                                onChange={(e) => setEndDate(e.target.value)}
+                                style={{ padding: '10px', border: '1px solid #00a6ff', width: '100%', boxSizing: 'border-box', borderRadius: '4px' }}
+                            />
+                        </div>
+                    </div>
+                </div>
             </div>
 
             {/* Display Statistik */}
-            <div style={{ marginBottom: '30px', padding: '20px', border: '1px solid #ccc', borderRadius: '8px', background: '#f8f8f8' }}>
-                <h3>Hasil Statistik Latihan ({keyword || 'Semua Aktivitas'}):</h3>
+            <div style={{ margin: '30px 0', padding: '20px', border: '1px solid #ccc', borderRadius: '8px', background: '#f8f8f8' }}>
+                <h3>Hasil Statistik Latihan ({filteredActivities.length} Aktivitas):</h3>
                 <div style={{ display: 'flex', justifyContent: 'space-around', marginTop: '15px' }}>
                     <div style={{ textAlign: 'center' }}>
                         <p style={{ fontSize: '1.2em', margin: '0 0 5px 0', color: '#333' }}>Total Aktivitas</p>
@@ -123,8 +183,8 @@ const TrainingPreparation: React.FC<TrainingPreparationProps> = ({ activities })
                 </>
             )}
 
-            {filteredActivities.length === 0 && keyword.trim() && (
-                 <p style={{ color: 'red', marginTop: '20px' }}>Tidak ada aktivitas yang ditemukan dengan keyword: "{keyword}".</p>
+            {filteredActivities.length === 0 && (keywords.trim() || startDate || endDate) && (
+                 <p style={{ color: 'red', marginTop: '20px' }}>Tidak ada aktivitas yang cocok dengan kriteria filter Anda.</p>
             )}
         </div>
     );

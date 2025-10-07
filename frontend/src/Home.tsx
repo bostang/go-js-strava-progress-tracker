@@ -1,6 +1,9 @@
 // frontend/src/Home.tsx
 import React from 'react';
-import { BACKEND_URL } from './App';
+
+// Konstanta BACKEND_URL didefinisikan secara lokal untuk mengatasi error impor.
+// Nilai ini harus sesuai dengan alamat backend Go Anda.
+const BACKEND_URL = 'http://localhost:8080';
 
 interface HomeProps {
     accessToken: string | null;
@@ -12,7 +15,10 @@ interface HomeProps {
 const styles = {
     // Style untuk container utama (opsional)
     container: {
-        border: '1px solid #ddd',
+        // FIX: Mengganti shorthand 'border' dengan longhand properties
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: '#ddd',
         padding: '20px',
         borderRadius: '8px',
         backgroundColor: '#f9f9f9',
@@ -83,10 +89,16 @@ const Home: React.FC<HomeProps> = ({ accessToken, loading, fetchActivities }) =>
             
             {!accessToken ? (
                 // Tampilan saat BELUM Terhubung
-                <div style={{...styles.container, backgroundColor: '#fff0e8', borderColor: '#e95420'}}>
+                <div style={{
+                    ...styles.container, 
+                    backgroundColor: '#fff0e8', 
+                    // Mengganti borderColor dengan property individual yang sudah ada di styles.container
+                    borderColor: '#e95420'
+                }}>
                     <p style={{ color: '#e95420', fontWeight: 'bold' }}>
                         ⚠️ Belum Terhubung!
                     </p>
+                    {/* Tombol yang mengarah ke endpoint otorisasi Strava di backend Go */}
                     <a href={`${BACKEND_URL}/api/auth/strava`}>
                         <button style={styles.connectButton}>
                             Hubungkan ke Strava
