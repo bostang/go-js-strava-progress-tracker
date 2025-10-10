@@ -43,11 +43,65 @@ type TokenData struct {
 }
 
 type PaceStat struct {
-	// Field Go        // JSON Tag
-	Red    float64 `json:"🔴 Merah (Maks/Interval)"`
-	Orange float64 `json:"🟠 Oranye (Tempo/Threshold)"`
-	Yellow float64 `json:"🟡 Kuning (Steady/Aerobic)"`
-	Green  float64 `json:"🟢 Hijau (Easy/Recovery)"`
+	// JSON tags disederhanakan agar sesuai dengan PaceStat di frontend (Red, Orange, Yellow, Green)
+	Red    float64 `json:"Red"`
+	Orange float64 `json:"Orange"`
+	Yellow float64 `json:"Yellow"`
+	Green  float64 `json:"Green"`
+}
+
+// WeeklySummaryStats: Struktur untuk menampung ringkasan statistik
+type WeeklySummaryStats struct {
+	TotalDistanceKM float64 `json:"total_distance_km"`
+	TotalMovingTime float64 `json:"total_moving_time_seconds"` // Dalam detik
+	AveragePace     float64 `json:"average_pace_sec_per_m"`    // Detik per meter (Global Pace)
+}
+
+// GlobalWeeklyData: Struktur Gabungan untuk respons ke frontend
+type GlobalWeeklyData struct {
+	PaceData WeeklyPaceData     `json:"pace_data"`
+	Summary  WeeklySummaryStats `json:"summary"`
+}
+
+// calculateWeeklySummaryStats menghitung total jarak, waktu, dan pace rata-rata untuk aktivitas lari.
+func calculateWeeklySummaryStats(activities []StravaActivity, startDate, endDate time.Time) WeeklySummaryStats {
+	var totalDistance float64   // meter
+	var totalMovingTime float64 // detik
+
+	// Untuk mencakup seluruh hari terakhir (endDate), kita cari aktivitas
+	// yang dimulai SEBELUM awal hari berikutnya.
+	nextDayStart := endDate.AddDate(0, 0, 1)
+
+	for _, activity := range activities {
+		if activity.Type != "Run" {
+			continue // Hanya hitung aktivitas lari
+		}
+
+		activityTime, err := time.Parse(time.RFC3339, activity.StartDateLocal)
+		if err != nil {
+			continue
+		}
+
+		// Cek apakah aktivitas berada dalam rentang [startDate, endDate)
+		if (activityTime.Equal(startDate) || activityTime.After(startDate)) &&
+			activityTime.Before(nextDayStart) {
+
+			totalDistance += activity.Distance
+			totalMovingTime += activity.MovingTime
+		}
+	}
+
+	summary := WeeklySummaryStats{
+		TotalDistanceKM: totalDistance / 1000.0,
+		TotalMovingTime: totalMovingTime,
+	}
+
+	if totalDistance > 0 {
+		// Pace rata-rata = Total Waktu (detik) / Total Jarak (meter)
+		summary.AveragePace = totalMovingTime / totalDistance
+	}
+
+	return summary
 }
 
 // WeeklyPaceData: Struktur baru untuk menampung data harian
@@ -305,6 +359,21 @@ func ensureValidToken() (string, error) {
 // --------------------------------------
 // HANDLER FUNCTIONS
 // --------------------------------------
+
+// Tambahkan fungsi pembantu agar dapat memuat StravaActivity lengkap untuk summary
+func loadActivitiesInStravaFormat() []StravaActivity {
+	data, err := os.ReadFile("data/strava_activities.json")
+	if err != nil {
+		log.Println("Error reading data file:", err)
+		return nil
+	}
+	var activities []StravaActivity
+	if err := json.Unmarshal(data, &activities); err != nil {
+		log.Println("Error unmarshaling activities:", err)
+		return nil
+	}
+	return activities
+}
 
 // fetchActivitiesFromStrava mengambil data dari cache lokal (data/strava_activities.json)
 // dan memfilternya berdasarkan rentang tanggal yang diminta (inklusif).
@@ -597,7 +666,7 @@ func handleGetWeeklyPaceStats(c *gin.Context) {
 	var err error
 
 	if startQuery != "" && endQuery != "" {
-		// ... (Logika parsing tanggal dari query params)
+		// Logika parsing tanggal tetap sama
 		startDate, err = time.ParseInLocation("2006-01-02", startQuery, loc)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid startDate format. Use YYYY-MM-DD."})
@@ -609,7 +678,7 @@ func handleGetWeeklyPaceStats(c *gin.Context) {
 			return
 		}
 	} else {
-		// Hitung default minggu ini: Senin-Minggu.
+		// Logika default minggu ini tetap sama
 		now := time.Now().In(loc)
 
 		offset := int(time.Monday - now.Weekday())
@@ -622,21 +691,26 @@ func handleGetWeeklyPaceStats(c *gin.Context) {
 	}
 
 	// 2. Muat aktivitas
-	activities := loadLocalActivities() // Sekarang dikenali
+	// Asumsi: loadLocalActivities() mengembalikan []StravaActivity
+	activities := loadLocalActivities()
+
+	// >>> LANGKAH BARU: HITUNG RINGKASAN MINGGUAN (Summary)
+	summary := calculateWeeklySummaryStats(activities, startDate, endDate)
 
 	// 3. Inisialisasi map data harian (WeeklyPaceData)
 	weeklyData := make(WeeklyPaceData)
 
-	// Inisialisasi semua hari dalam rentang (Senin-Minggu) ke nol
+	// Inisialisasi SEMUA 7 HARI DALAM MINGGU KE NOL
 	current := startDate
 	for current.Before(endDate.AddDate(0, 0, 1)) {
 		dateStr := current.Format("2006-01-02")
-		weeklyData[dateStr] = PaceStat{} // Inisialisasi PaceStat kosong
+		weeklyData[dateStr] = PaceStat{}
 		current = current.AddDate(0, 0, 1)
 	}
 
-	// 4. Iterasi dan hitung aktivitas harian
+	// 4. Iterasi dan hitung aktivitas harian (PaceData)
 	for _, activity := range activities {
+		// Pastikan menggunakan StartDateLocal untuk penanggalan harian yang akurat
 		activityTime, err := time.Parse(time.RFC3339, activity.StartDateLocal)
 		if err != nil {
 			continue
@@ -650,9 +724,8 @@ func handleGetWeeklyPaceStats(c *gin.Context) {
 
 			dateStr := activityDate.Format("2006-01-02")
 
-			paceStats := calculatePaceStats(activity) // Sekarang dikenali
+			paceStats := calculatePaceStats(activity)
 
-			// Tambahkan ke total harian yang sudah ada di map (FIELD BERHURUF KAPITAL)
 			currentDayStats := weeklyData[dateStr]
 			currentDayStats.Red += paceStats.Red
 			currentDayStats.Orange += paceStats.Orange
@@ -662,8 +735,14 @@ func handleGetWeeklyPaceStats(c *gin.Context) {
 		}
 	}
 
-	// 5. Kirim map data harian (WeeklyPaceData) sebagai respons JSON
-	c.JSON(http.StatusOK, weeklyData)
+	// >>> LANGKAH BARU: Kumpulkan data harian dan ringkasan ke dalam GlobalWeeklyData
+	finalResponse := GlobalWeeklyData{
+		PaceData: weeklyData,
+		Summary:  summary,
+	}
+
+	// 5. Kirim GlobalWeeklyData sebagai respons JSON
+	c.JSON(http.StatusOK, finalResponse)
 }
 
 // handleGetDistanceStats: Mengembalikan ringkasan statistik jarak bulanan (Sama)
