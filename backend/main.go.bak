@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sync"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,36 +26,18 @@ var (
 	scope       = "read,activity:read_all"
 )
 
-const (
-	dataFilePath   = "data/strava_activities.json"
-	tokenFilePath  = "data/strava_token.json" // File baru untuk menyimpan token
-	dataDir        = "data"
-	tokenTTLMargin = 60 * time.Second // Margin 60 detik sebelum token benar-benar kedaluwarsa
-)
+const dataFilePath = "data/strava_activities.json"
 
-// --- Token Management Structures ---
-
-// TokenData menyimpan token dan status kedaluwarsa untuk persistensi lokal.
-type TokenData struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresAt    int64  `json:"expires_at"` // Unix timestamp
-}
-
-// Global variable to hold the token data in memory and protect access
-var (
-	currentTokens TokenData
-	tokenMutex    sync.Mutex // Untuk mencegah race condition saat mengakses token
-)
-
-// StravaTokenResponse merepresentasikan struktur respons token dari Strava (digunakan saat pertukaran kode/refresh).
+// StravaTokenResponse merepresentasikan struktur respons token dari Strava.
 type StravaTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
-	ExpiresAt    int64  `json:"expires_at"` // Unix timestamp
+	ExpiresAt    int64  `json:"expires_at"`
 }
 
-// MinimalActivityData (struktur yang sama)
+// MinimalActivityData digunakan untuk deserialisasi data lokal untuk keperluan statistik.
+// Menggunakan float64 untuk moving_time karena dapat dikirim sebagai int atau float di JSON,
+// namun tipe ini lebih aman untuk perhitungan.
 type MinimalActivityData struct {
 	StartDate  string  `json:"start_date"`
 	Distance   float64 `json:"distance"`    // meter
@@ -63,7 +45,7 @@ type MinimalActivityData struct {
 	Type       string  `json:"type"`
 }
 
-// MonthlySportStats (struktur yang sama)
+// MonthlySportStats digunakan untuk menyimpan ringkasan statistik jarak per bulan dan per tipe olahraga.
 type MonthlySportStats struct {
 	MonthYear   string  `json:"month_year"` // Format: YYYY-MM
 	RunWalkHike float64 `json:"run_walk_hike"`
@@ -71,19 +53,21 @@ type MonthlySportStats struct {
 	Other       float64 `json:"other"`
 }
 
-// MonthlyPaceStats (struktur yang sama)
+// MonthlyPaceStats menyimpan ringkasan pace rata-rata bulanan.
 type MonthlyPaceStats struct {
 	MonthYear string `json:"month_year"` // Format: YYYY-MM
 
 	// Data Akumulasi Waktu & Jarak per Kategori (digunakan untuk perhitungan)
-	RunWalkHikeTime     float64 `json:"-"`
-	RunWalkHikeDistance float64 `json:"-"`
+	RunWalkHikeTime     float64 `json:"-"` // Time in seconds
+	RunWalkHikeDistance float64 `json:"-"` // Distance in meters
 	BikeTime            float64 `json:"-"`
 	BikeDistance        float64 `json:"-"`
 	OtherTime           float64 `json:"-"`
 	OtherDistance       float64 `json:"-"`
 
 	// Pace Rata-rata yang akan dikirim ke Frontend (detik/meter)
+	// Kita akan menggunakan satuan yang lebih ramah pengguna di frontend (misalnya menit/km)
+	// Namun di backend kita hitung sebagai detik/meter.
 	RunWalkHikePace float64 `json:"run_walk_hike_pace"` // detik/meter
 	BikePace        float64 `json:"bike_pace"`          // detik/meter
 	OtherPace       float64 `json:"other_pace"`         // detik/meter
@@ -93,6 +77,7 @@ func main() {
 	// 1. Muat variabel lingkungan dari file .env
 	err := godotenv.Load()
 	if err != nil {
+		// Log peringatan jika .env tidak ditemukan, tapi lanjutkan karena mungkin menggunakan ENV sistem.
 		fmt.Println("Peringatan: Tidak dapat memuat file .env. Menggunakan Environment Variables Sistem.")
 	}
 
@@ -109,9 +94,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 2. Muat token yang tersimpan saat startup
-	loadToken()
-
 	// Gunakan gin.ReleaseMode jika tidak dalam development untuk mengurangi log verbosity
 	if os.Getenv("GIN_MODE") == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -121,10 +103,11 @@ func main() {
 
 	// --- Konfigurasi CORS (PENTING) ---
 	router.Use(func(c *gin.Context) {
+		// Izinkan frontend Anda
 		c.Writer.Header().Set("Access-Control-Allow-Origin", frontendURL)
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true") // Diperlukan jika menggunakan cookie/session
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusOK)
@@ -140,7 +123,6 @@ func main() {
 	router.GET("/strava-callback", handleStravaCallback)
 
 	// Endpoint untuk data: Mengambil data aktivitas dari Strava (dengan caching lokal)
-	// Catatan: Token tidak lagi diperlukan sebagai query param
 	router.GET("/api/activities", handleGetActivities)
 
 	// Endpoint untuk statistik: Menghitung dari data lokal
@@ -149,132 +131,6 @@ func main() {
 
 	fmt.Printf("Server Go berjalan di http://localhost:%s\n", port)
 	router.Run(":" + port)
-}
-
-// --------------------------------------
-// TOKEN MANAGEMENT FUNCTIONS
-// --------------------------------------
-
-// loadToken memuat token dari file lokal ke memori.
-func loadToken() {
-	tokenMutex.Lock()
-	defer tokenMutex.Unlock()
-
-	data, err := os.ReadFile(tokenFilePath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			fmt.Printf("Peringatan: Gagal membaca file token: %v\n", err)
-		} else {
-			fmt.Println("Peringatan: File token tidak ditemukan. Pengguna perlu login Strava.")
-		}
-		return
-	}
-
-	if err := json.Unmarshal(data, &currentTokens); err != nil {
-		fmt.Printf("Peringatan: Gagal mengurai file token: %v\n", err)
-		return
-	}
-
-	fmt.Printf("Token berhasil dimuat. Token kedaluwarsa pada: %s\n", time.Unix(currentTokens.ExpiresAt, 0).Format(time.RFC822))
-}
-
-// saveToken menyimpan token dari memori ke file lokal.
-func saveToken(t TokenData) error {
-	tokenMutex.Lock()
-	defer tokenMutex.Unlock()
-
-	// Perbarui token global di memori
-	currentTokens = t
-
-	// Buat folder data jika belum ada
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return fmt.Errorf("gagal membuat direktori data: %w", err)
-	}
-
-	data, err := json.MarshalIndent(t, "", " ")
-	if err != nil {
-		return fmt.Errorf("gagal marshal token: %w", err)
-	}
-
-	if err := os.WriteFile(tokenFilePath, data, 0644); err != nil {
-		return fmt.Errorf("gagal menulis file token: %w", err)
-	}
-	fmt.Printf("Token baru berhasil disimpan. Kedaluwarsa pada: %s\n", time.Unix(t.ExpiresAt, 0).Format(time.RFC822))
-	return nil
-}
-
-// refreshAccessToken menukar refresh token lama dengan access token baru.
-func refreshAccessToken() error {
-	tokenMutex.Lock()
-	defer tokenMutex.Unlock()
-
-	if currentTokens.RefreshToken == "" {
-		return fmt.Errorf("tidak ada refresh token yang tersimpan. Pengguna harus login ulang")
-	}
-
-	fmt.Printf("Token lama kedaluwarsa. Mencoba refresh token...\n")
-
-	data := url.Values{}
-	data.Set("client_id", clientID)
-	data.Set("client_secret", clientSecret)
-	data.Set("grant_type", "refresh_token")
-	data.Set("refresh_token", currentTokens.RefreshToken)
-
-	resp, err := http.PostForm("https://www.strava.com/oauth/token", data)
-	if err != nil {
-		return fmt.Errorf("gagal request refresh token: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("gagal refresh token. Status: %s, Body: %s", resp.Status, bodyBytes)
-	}
-
-	var newTokens StravaTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&newTokens); err != nil {
-		return fmt.Errorf("gagal mengurai respons refresh token: %w", err)
-	}
-
-	// Update token di memori dan file
-	currentTokens.AccessToken = newTokens.AccessToken
-	currentTokens.ExpiresAt = newTokens.ExpiresAt
-	if newTokens.RefreshToken != "" {
-		// Strava terkadang mengeluarkan refresh token baru, terkadang tidak.
-		currentTokens.RefreshToken = newTokens.RefreshToken
-	}
-
-	// Simpan token baru
-	if err := saveToken(currentTokens); err != nil {
-		return fmt.Errorf("gagal menyimpan token yang di-refresh: %w", err)
-	}
-
-	fmt.Println("Refresh token berhasil! Access token baru telah disimpan.")
-	return nil
-}
-
-// ensureValidToken memeriksa kedaluwarsa token dan melakukan refresh jika diperlukan.
-func ensureValidToken() (string, error) {
-	tokenMutex.Lock()
-	defer tokenMutex.Unlock()
-
-	if currentTokens.AccessToken == "" {
-		return "", fmt.Errorf("access token tidak ada. Silakan login melalui /api/auth/strava")
-	}
-
-	// Cek apakah token akan kedaluwarsa dalam waktu dekat
-	expiryTime := time.Unix(currentTokens.ExpiresAt, 0)
-	if time.Now().Add(tokenTTLMargin).After(expiryTime) {
-		// Token sudah kedaluwarsa atau mendekati kedaluwarsa, lepaskan lock dan refresh.
-		// Catatan: refreshAccessToken akan mengakuisisi lock-nya sendiri.
-		tokenMutex.Unlock()
-		defer tokenMutex.Lock()
-		if err := refreshAccessToken(); err != nil {
-			return "", err
-		}
-	}
-
-	return currentTokens.AccessToken, nil
 }
 
 // --------------------------------------
@@ -293,28 +149,17 @@ func handleStatus(c *gin.Context) {
 		fileStatus = fmt.Sprintf("Error: %s", err.Error())
 	}
 
-	tokenMutex.Lock()
-	isTokenValid := currentTokens.AccessToken != "" && time.Now().Before(time.Unix(currentTokens.ExpiresAt, 0).Add(-tokenTTLMargin))
-	expiryInfo := "N/A"
-	if currentTokens.ExpiresAt > 0 {
-		expiryInfo = time.Unix(currentTokens.ExpiresAt, 0).Format(time.RFC822)
-	}
-	tokenMutex.Unlock()
-
 	c.JSON(http.StatusOK, gin.H{
-		"status":        "Backend is running 🟢",
-		"data_file":     dataFilePath,
-		"file_status":   fileStatus,
-		"token_status":  isTokenValid,
-		"token_expires": expiryInfo,
-		"refresh_token": currentTokens.RefreshToken != "", // Hanya untuk debug, cek apakah refresh token ada
+		"status":      "Backend is running 🟢",
+		"data_file":   dataFilePath,
+		"file_status": fileStatus,
 	})
 }
 
 // handleStravaLogin mengarahkan pengguna ke halaman otorisasi Strava.
 func handleStravaLogin(c *gin.Context) {
 	authURL := fmt.Sprintf(
-		"http://www.strava.com/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=%s&approval_prompt=force", // approval_prompt=force agar dapat refresh token baru
+		"http://www.strava.com/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=%s",
 		clientID,
 		redirectURI,
 		scope,
@@ -364,36 +209,24 @@ func handleStravaCallback(c *gin.Context) {
 		return
 	}
 
-	// --- FIX: Simpan SEMUA data token (termasuk refresh token) ke file lokal ---
-	if err := saveToken(TokenData(tokenResponse)); err != nil {
-		fmt.Printf("Error saving token: %v\n", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save token locally"})
-		return
-	}
-
-	// Alihkan ke frontend. Token kini dikelola di backend.
-	fmt.Println("Token berhasil didapatkan dan disimpan. Mengarahkan ke frontend.")
-	c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("%s/?auth_status=success", frontendURL))
+	// PENTING: Untuk aplikasi produksi, token ini harus disimpan di database server-side,
+	// TIDAK dikirim langsung ke frontend melalui URL! Ini adalah DEMO.
+	fmt.Println("Token berhasil didapatkan. Mengarahkan ke frontend.")
+	c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("%s/?token=%s&expires_at=%d", frontendURL, tokenResponse.AccessToken, tokenResponse.ExpiresAt))
 }
 
-// handleGetActivities: Logika Caching dan Refresh Token
+// handleGetActivities: Logika Caching (Prioritas Baca Lokal)
 func handleGetActivities(c *gin.Context) {
-	// Pastikan token valid atau refresh token
-	accessToken, err := ensureValidToken()
-	if err != nil {
-		fmt.Printf("Error during token check/refresh: %v\n", err)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token tidak valid atau gagal di-refresh. Silakan login ulang via /api/auth/strava", "details": err.Error()})
-		return
-	}
-
+	// Peringatan Keamanan: Mengirim token melalui query parameter adalah tidak aman untuk produksi.
+	// Gunakan header Authorization, cookie, atau session management.
+	accessToken := c.Query("token")
 	shouldRefresh := c.Query("refresh") == "true"
 
 	// 1. Cek file lokal dan kondisi refresh
-	_, err = os.Stat(dataFilePath)
+	_, err := os.Stat(dataFilePath)
 	fileExist := err == nil
 
 	if fileExist && !shouldRefresh {
-		// Logika membaca file lokal yang sama
 		fmt.Println("Membaca data dari file lokal:", dataFilePath)
 		fileContent, err := os.ReadFile(dataFilePath)
 		if err != nil {
@@ -401,9 +234,11 @@ func handleGetActivities(c *gin.Context) {
 			return
 		}
 
+		// Karena kita tidak tahu struktur JSON Strava secara lengkap, kita pakai []interface{}
 		var localActivities []map[string]interface{}
 		if err := json.Unmarshal(fileContent, &localActivities); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengurai file JSON lokal", "details": err.Error()})
+			// Jika file rusak, coba refresh dari Strava
 			fmt.Println("File JSON lokal rusak. Mencoba mengambil data baru...")
 		} else {
 			c.JSON(http.StatusOK, localActivities)
@@ -412,13 +247,17 @@ func handleGetActivities(c *gin.Context) {
 	}
 
 	// 2. Ambil data baru jika file tidak ada/rusak ATAU refresh diminta
+	if accessToken == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Access token diperlukan untuk mengambil data Strava baru. Silakan login ulang."})
+		return
+	}
+
 	if shouldRefresh {
 		fmt.Println("Memaksa refresh. Mengambil semua data baru dari Strava...")
 	} else {
 		fmt.Println("File lokal tidak ditemukan atau rusak. Mengambil data dari Strava...")
 	}
 
-	// Gunakan accessToken yang sudah dipastikan valid/baru dari ensureValidToken
 	if err := fetchAndSaveAllActivities(accessToken); err != nil {
 		fmt.Printf("Error fetchAndSaveAllActivities: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengambil dan menyimpan aktivitas dari Strava", "details": err.Error()})
@@ -437,14 +276,8 @@ func handleGetActivities(c *gin.Context) {
 	c.JSON(http.StatusOK, savedActivities)
 }
 
-// handleGetDistanceStats: Mengembalikan ringkasan statistik jarak bulanan (Sama)
+// handleGetDistanceStats: Mengembalikan ringkasan statistik jarak bulanan
 func handleGetDistanceStats(c *gin.Context) {
-	// Periksa token sebelum mencoba membaca data lokal (data lokal dihasilkan dari Strava)
-	if _, err := ensureValidToken(); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token tidak valid, tidak dapat memproses data lokal. Silakan sinkronisasi ulang.", "details": err.Error()})
-		return
-	}
-
 	stats, err := calculateMonthlyDistanceStats()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal menghitung statistik jarak", "details": err.Error()})
@@ -454,14 +287,8 @@ func handleGetDistanceStats(c *gin.Context) {
 	c.JSON(http.StatusOK, stats)
 }
 
-// handleGetPaceStats: Mengembalikan ringkasan statistik pace bulanan (Sama)
+// handleGetPaceStats: Mengembalikan ringkasan statistik pace bulanan
 func handleGetPaceStats(c *gin.Context) {
-	// Periksa token sebelum mencoba membaca data lokal
-	if _, err := ensureValidToken(); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token tidak valid, tidak dapat memproses data lokal. Silakan sinkronisasi ulang.", "details": err.Error()})
-		return
-	}
-
 	stats, err := calculateMonthlyPaceStats()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal menghitung statistik pace", "details": err.Error()})
@@ -476,7 +303,6 @@ func handleGetPaceStats(c *gin.Context) {
 // --------------------------------------
 
 // fetchAndSaveAllActivities mengambil semua aktivitas dari Strava dan menyimpannya ke file JSON.
-// Menggunakan access token yang sudah dipastikan valid.
 func fetchAndSaveAllActivities(accessToken string) error {
 	var allActivities []map[string]interface{}
 	page := 1
@@ -494,7 +320,6 @@ func fetchAndSaveAllActivities(accessToken string) error {
 		if err != nil {
 			return fmt.Errorf("gagal membuat request: %w", err)
 		}
-		// Gunakan access token yang valid
 		req.Header.Add("Authorization", "Bearer "+accessToken)
 
 		resp, err := client.Do(req)
@@ -526,7 +351,7 @@ func fetchAndSaveAllActivities(accessToken string) error {
 	}
 
 	// Buat folder data jika belum ada
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dataFilePath), 0755); err != nil {
 		return fmt.Errorf("gagal membuat direktori data: %w", err)
 	}
 
@@ -538,7 +363,7 @@ func fetchAndSaveAllActivities(accessToken string) error {
 	defer file.Close()
 
 	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", " ") // Agar file JSON mudah dibaca
+	encoder.SetIndent("", "  ") // Agar file JSON mudah dibaca
 	if err := encoder.Encode(allActivities); err != nil {
 		return fmt.Errorf("gagal menulis ke file JSON: %w", err)
 	}
@@ -547,7 +372,7 @@ func fetchAndSaveAllActivities(accessToken string) error {
 	return nil
 }
 
-// classifyActivity (Sama)
+// classifyActivity mengelompokkan tipe olahraga ke dalam kategori yang ditentukan.
 func classifyActivity(activityType string) string {
 	switch activityType {
 	case "Run", "Walk", "Hike", "TrailRun":
@@ -560,7 +385,7 @@ func classifyActivity(activityType string) string {
 	}
 }
 
-// readLocalActivities (Sama)
+// readLocalActivities membaca data aktivitas lokal dan menguraikannya menjadi slice of MinimalActivityData.
 func readLocalActivities() ([]MinimalActivityData, error) {
 	fileContent, err := os.ReadFile(dataFilePath)
 	if err != nil {
@@ -571,6 +396,8 @@ func readLocalActivities() ([]MinimalActivityData, error) {
 		return nil, fmt.Errorf("gagal membaca file data lokal: %w", err)
 	}
 
+	// Karena data lokal disimpan sebagai []map[string]interface{}, kita perlu menguraikannya
+	// dan mengkonversinya ke MinimalActivityData untuk perhitungan yang aman.
 	var rawActivities []map[string]interface{}
 	if err := json.Unmarshal(fileContent, &rawActivities); err != nil {
 		return nil, fmt.Errorf("gagal mengurai file JSON: %w", err)
@@ -601,7 +428,7 @@ func readLocalActivities() ([]MinimalActivityData, error) {
 	return minimalActivities, nil
 }
 
-// getFloat (Sama)
+// getFloat adalah helper untuk menangani angka yang mungkin berupa float64 atau int di JSON.
 func getFloat(v interface{}) (float64, bool) {
 	switch f := v.(type) {
 	case float64:
@@ -615,7 +442,7 @@ func getFloat(v interface{}) (float64, bool) {
 	}
 }
 
-// calculateMonthlyDistanceStats (Sama)
+// calculateMonthlyDistanceStats menghitung statistik jarak bulanan berdasarkan tipe olahraga.
 func calculateMonthlyDistanceStats() ([]MonthlySportStats, error) {
 	activities, err := readLocalActivities()
 	if err != nil {
@@ -662,7 +489,7 @@ func calculateMonthlyDistanceStats() ([]MonthlySportStats, error) {
 	return monthlyStats, nil
 }
 
-// calculateMonthlyPaceStats (Sama)
+// calculateMonthlyPaceStats menghitung pace rata-rata bulanan per kategori.
 func calculateMonthlyPaceStats() ([]MonthlyPaceStats, error) {
 	activities, err := readLocalActivities()
 	if err != nil {
