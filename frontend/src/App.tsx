@@ -9,7 +9,8 @@ import PaceStats from './PaceStats';
 import AllActivities from './AllActivities';
 import PerformancePlot from './PerformancePlot';
 import TrainingPreparation from './TrainingPreparation'; 
-import TempoStats from './TempoStats'; // <--- IMPORT BARU
+import TempoStats from './TempoStats';
+import WeeklyActivity from './WeeklyActivity';
 // ----------------------------
 
 // --- Interface Data Global ---
@@ -192,7 +193,8 @@ const App: React.FC = () => {
                         <Link to="/stats/pace" style={linkStyle}>Pace Stats</Link>
                         <Link to="/plot/performance" style={linkStyle}>Performance Plot</Link>
                         <Link to="/preparation" style={linkStyle}>Training Preparation</Link> 
-                        <Link to="/stats/tempo" style={linkStyle}>Tempo Stats</Link> {/* <--- LINK BARU */}
+                        <Link to="/stats/tempo" style={linkStyle}>Tempo Stats</Link> 
+                        <Link to="/stats/weekly-pace" style={linkStyle}>Weekly Activity</Link> {/* 🌟 BARU: Link untuk Aktivitas Mingguan */}
                     </nav>
                 )}
             </header>
@@ -252,7 +254,7 @@ const App: React.FC = () => {
                             />
                         }
                     />
-                    {/* Rute untuk Tempo Stats BARU */}
+                    {/* Rute untuk Tempo Stats */}
                     <Route 
                         path="/stats/tempo" 
                         element={
@@ -260,6 +262,12 @@ const App: React.FC = () => {
                                 activities={activities}
                             />
                         }
+                    />
+
+                    {/* 🌟 Rute BARU: Aktivitas per Minggu */}
+                    <Route 
+                        path="/stats/weekly-pace" 
+                        element={<WeeklyActivity />} 
                     />
                 </Routes>
             </main>

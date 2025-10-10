@@ -1,10 +1,10 @@
-// backend/main.go
 package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,6 +42,18 @@ type TokenData struct {
 	ExpiresAt    int64  `json:"expires_at"` // Unix timestamp
 }
 
+type PaceStat struct {
+	// Field Go        // JSON Tag
+	Red    float64 `json:"🔴 Merah (Maks/Interval)"`
+	Orange float64 `json:"🟠 Oranye (Tempo/Threshold)"`
+	Yellow float64 `json:"🟡 Kuning (Steady/Aerobic)"`
+	Green  float64 `json:"🟢 Hijau (Easy/Recovery)"`
+}
+
+// WeeklyPaceData: Struktur baru untuk menampung data harian
+// Kunci: Tanggal (string YYYY-MM-DD), Nilai: PaceStat untuk hari itu
+type WeeklyPaceData map[string]PaceStat
+
 // Global variable to hold the token data in memory and protect access
 var (
 	currentTokens TokenData
@@ -69,6 +81,18 @@ type MonthlySportStats struct {
 	RunWalkHike float64 `json:"run_walk_hike"`
 	Bike        float64 `json:"bike"`
 	Other       float64 `json:"other"`
+}
+
+type StravaActivity struct {
+	ID             int64   `json:"id"`
+	Name           string  `json:"name"`
+	Distance       float64 `json:"distance"`     // meter
+	MovingTime     float64 `json:"moving_time"`  // detik
+	ElapsedTime    float64 `json:"elapsed_time"` // detik
+	Type           string  `json:"type"`
+	StartDate      string  `json:"start_date"`       // UTC time (RFC3339)
+	StartDateLocal string  `json:"start_date_local"` // Local time (RFC3339)
+	// Tambahkan field lain yang mungkin Anda gunakan
 }
 
 // MonthlyPaceStats (struktur yang sama)
@@ -140,12 +164,13 @@ func main() {
 	router.GET("/strava-callback", handleStravaCallback)
 
 	// Endpoint untuk data: Mengambil data aktivitas dari Strava (dengan caching lokal)
-	// Catatan: Token tidak lagi diperlukan sebagai query param
 	router.GET("/api/activities", handleGetActivities)
 
 	// Endpoint untuk statistik: Menghitung dari data lokal
 	router.GET("/api/stats", handleGetDistanceStats)
 	router.GET("/api/pace-stats", handleGetPaceStats)
+
+	router.GET("/api/weekly-pace-stats", handleGetWeeklyPaceStats)
 
 	fmt.Printf("Server Go berjalan di http://localhost:%s\n", port)
 	router.Run(":" + port)
@@ -280,6 +305,48 @@ func ensureValidToken() (string, error) {
 // --------------------------------------
 // HANDLER FUNCTIONS
 // --------------------------------------
+
+// fetchActivitiesFromStrava mengambil data dari cache lokal (data/strava_activities.json)
+// dan memfilternya berdasarkan rentang tanggal yang diminta (inklusif).
+// Parameter:
+// - accessToken: Tidak digunakan karena membaca dari cache lokal.
+// - startDate, endDate: Rentang waktu (inklusif), harus berupa UTC 00:00:00.
+func fetchActivitiesFromStrava(accessToken string, startDate, endDate time.Time) ([]MinimalActivityData, error) {
+	// Abaikan accessToken karena kita menggunakan cache lokal untuk performa.
+
+	// 1. Baca semua aktivitas dari cache lokal
+	allActivities, err := readLocalActivities()
+	if err != nil {
+		// Langsung kembalikan error jika gagal membaca/mengurai file cache
+		return nil, fmt.Errorf("gagal membaca data aktivitas lokal: %w", err)
+	}
+
+	var filteredActivities []MinimalActivityData
+
+	// Untuk mencakup seluruh hari terakhir (endDate), kita cari aktivitas
+	// yang dimulai SEBELUM awal hari berikutnya.
+	nextDayStart := endDate.AddDate(0, 0, 1) // Ini adalah 00:00:00Z di hari Senin minggu berikutnya
+
+	for _, activity := range allActivities {
+		// Parse tanggal mulai aktivitas yang tersimpan dalam format RFC3339 (yang selalu UTC)
+		t, err := time.Parse(time.RFC3339, activity.StartDate)
+		if err != nil {
+			fmt.Printf("Peringatan: Gagal mengurai tanggal aktivitas '%s'. Aktivitas dilewati.\n", activity.StartDate)
+			continue
+		}
+
+		// Filter: activity time harus >= startDate (inklusi Senin 00:00:00Z)
+		// DAN activity time < nextDayStart (inklusi Minggu 23:59:59Z)
+		isAfterOrEqualStart := t.Equal(startDate) || t.After(startDate)
+		isBeforeNextDay := t.Before(nextDayStart)
+
+		if isAfterOrEqualStart && isBeforeNextDay {
+			filteredActivities = append(filteredActivities, activity)
+		}
+	}
+
+	return filteredActivities, nil
+}
 
 func handleStatus(c *gin.Context) {
 	// Cek status file data
@@ -435,6 +502,168 @@ func handleGetActivities(c *gin.Context) {
 	json.Unmarshal(fileContent, &savedActivities)
 
 	c.JSON(http.StatusOK, savedActivities)
+}
+
+// main.go (Tambahkan atau pastikan fungsi ini ada)
+func loadLocalActivities() []StravaActivity {
+	// Pastikan path ke file lokal sudah benar
+	data, err := os.ReadFile("data/strava_activities.json")
+	if err != nil {
+		log.Println("Error reading data file:", err)
+		return nil
+	}
+
+	var activities []StravaActivity // Menggunakan StravaActivity
+	if err := json.Unmarshal(data, &activities); err != nil {
+		log.Println("Error unmarshaling activities:", err)
+		return nil
+	}
+	return activities
+}
+
+func calculatePaceStats(activity StravaActivity) PaceStat {
+	var stats PaceStat
+
+	// Hanya proses aktivitas lari/run
+	if activity.Type != "Run" {
+		return stats // Mengembalikan PaceStat kosong
+	}
+
+	// Jarak (meter)
+	distanceM := activity.Distance
+	// Waktu bergerak (detik)
+	movingTimeS := activity.MovingTime
+
+	if distanceM <= 0 || movingTimeS <= 0 {
+		return stats
+	}
+
+	// Kecepatan rata-rata (meter/detik)
+	avgSpeedMPS := distanceM / movingTimeS
+
+	// Zona pace ilustratif (sesuai dengan frontend)
+	paceZone := getPaceZone(avgSpeedMPS)
+
+	// Konversi jarak total ke KM
+	distanceKM := distanceM / 1000.0
+
+	// Distribusikan Jarak total ke zona yang ditentukan
+	switch paceZone {
+	case "🔴 Merah (Maks/Interval)":
+		stats.Red = distanceKM
+	case "🟠 Oranye (Tempo/Threshold)":
+		stats.Orange = distanceKM
+	case "🟡 Kuning (Steady/Aerobic)":
+		stats.Yellow = distanceKM
+	case "🟢 Hijau (Easy/Recovery)":
+		stats.Green = distanceKM
+	}
+
+	return stats
+}
+
+// PaceStat digunakan untuk mengembalikan data agregasi statistik
+// CATATAN: Struktur ini tidak lagi digunakan, tetapi dipertahankan agar kode kompilasi
+// type PaceStat struct {
+// 	PaceDistances map[string]float64 `json:"paceDistances"`
+// }
+
+// getPaceZone mengelompokkan kecepatan rata-rata (m/s) ke dalam zona warna
+func getPaceZone(speed float64) string {
+	// Pace zones ilustratif berdasarkan kecepatan (m/s)
+	// Kecepatan dihitung dari distance/elapsed_time
+	// Semakin tinggi m/s, semakin cepat lari
+	if speed >= 4.8 {
+		return "🔴 Merah (Maks/Interval)" // Pace < 3:28 /km
+	} else if speed >= 3.8 {
+		return "🟠 Oranye (Tempo/Threshold)" // Pace 3:28 - 4:23 /km
+	} else if speed >= 3.0 {
+		return "🟡 Kuning (Steady/Aerobic)" // Pace 4:23 - 5:33 /km
+	} else {
+		return "🟢 Hijau (Easy/Recovery)" // Pace > 5:33 /km
+	}
+}
+
+// handleGetWeeklyPaceStats: Mengambil aktivitas dalam rentang tanggal dan mengagregasi jarak per zona tempo
+func handleGetWeeklyPaceStats(c *gin.Context) {
+	// Gunakan UTC (atau zona waktu yang konsisten)
+	loc := time.UTC
+
+	// 1. Ambil query params startDate dan endDate
+	startQuery := c.Query("startDate")
+	endQuery := c.Query("endDate")
+
+	var startDate, endDate time.Time
+	var err error
+
+	if startQuery != "" && endQuery != "" {
+		// ... (Logika parsing tanggal dari query params)
+		startDate, err = time.ParseInLocation("2006-01-02", startQuery, loc)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid startDate format. Use YYYY-MM-DD."})
+			return
+		}
+		endDate, err = time.ParseInLocation("2006-01-02", endQuery, loc)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid endDate format. Use YYYY-MM-DD."})
+			return
+		}
+	} else {
+		// Hitung default minggu ini: Senin-Minggu.
+		now := time.Now().In(loc)
+
+		offset := int(time.Monday - now.Weekday())
+		if offset > 0 {
+			offset = -6
+		}
+
+		startDate = now.AddDate(0, 0, offset).Truncate(24 * time.Hour)
+		endDate = startDate.AddDate(0, 0, 6).Truncate(24 * time.Hour)
+	}
+
+	// 2. Muat aktivitas
+	activities := loadLocalActivities() // Sekarang dikenali
+
+	// 3. Inisialisasi map data harian (WeeklyPaceData)
+	weeklyData := make(WeeklyPaceData)
+
+	// Inisialisasi semua hari dalam rentang (Senin-Minggu) ke nol
+	current := startDate
+	for current.Before(endDate.AddDate(0, 0, 1)) {
+		dateStr := current.Format("2006-01-02")
+		weeklyData[dateStr] = PaceStat{} // Inisialisasi PaceStat kosong
+		current = current.AddDate(0, 0, 1)
+	}
+
+	// 4. Iterasi dan hitung aktivitas harian
+	for _, activity := range activities {
+		activityTime, err := time.Parse(time.RFC3339, activity.StartDateLocal)
+		if err != nil {
+			continue
+		}
+
+		activityDate := activityTime.In(loc).Truncate(24 * time.Hour)
+
+		// Cek apakah aktivitas berada dalam rentang [startDate, endDate]
+		if (activityDate.Equal(startDate) || activityDate.After(startDate)) &&
+			(activityDate.Equal(endDate) || activityDate.Before(endDate.AddDate(0, 0, 1))) {
+
+			dateStr := activityDate.Format("2006-01-02")
+
+			paceStats := calculatePaceStats(activity) // Sekarang dikenali
+
+			// Tambahkan ke total harian yang sudah ada di map (FIELD BERHURUF KAPITAL)
+			currentDayStats := weeklyData[dateStr]
+			currentDayStats.Red += paceStats.Red
+			currentDayStats.Orange += paceStats.Orange
+			currentDayStats.Yellow += paceStats.Yellow
+			currentDayStats.Green += paceStats.Green
+			weeklyData[dateStr] = currentDayStats
+		}
+	}
+
+	// 5. Kirim map data harian (WeeklyPaceData) sebagai respons JSON
+	c.JSON(http.StatusOK, weeklyData)
 }
 
 // handleGetDistanceStats: Mengembalikan ringkasan statistik jarak bulanan (Sama)
